@@ -146,6 +146,7 @@ const ProblemStatements = () => {
     setShowConfirmation(true);
   }, [problemCounts, teamRegistrationStatus, team]);
 
+<<<<<<< HEAD
   // RACE-CONDITION SAFE: Queue-based submission system with slot availability checking
   const handleConfirmSelection = async () => {
     if (!selectedProblem) return;
@@ -160,10 +161,19 @@ const ProblemStatements = () => {
 
     // QUEUE SYSTEM: Add to submission queue for processing
     setIsCheckingAvailability(true);
+=======
+  // RACE-CONDITION SAFE: Atomic transaction for registration with double-check
+  const handleConfirmSelection = async () => {
+    if (!selectedProblem) return;
+
+    setIsProcessing(true);
+    setLoading(true);
+>>>>>>> parent of 58b435b (sep)
     setShowConfirmation(false);
     setRealTimeError('');
     
     try {
+<<<<<<< HEAD
       // Generate unique queue ID for this submission
       const queueId = `${team.teamNumber}_${selectedProblem.id}_${Date.now()}`;
       
@@ -190,6 +200,11 @@ const ProblemStatements = () => {
       // SLOT AVAILABILITY CHECK: Use atomic transaction to check and reserve slot
       const result = await runTransaction(db, async (transaction) => {
         // Get current registrations at the exact moment of processing
+=======
+      // ATOMIC TRANSACTION: Ensures no race conditions with 3-team limit
+      await runTransaction(db, async (transaction) => {
+        // Double-check: Get current registrations count at time of registration
+>>>>>>> parent of 58b435b (sep)
         const registrationsRef = collection(db, 'registrations');
         const q = query(registrationsRef);
         const querySnapshot = await getDocs(q);
@@ -208,6 +223,7 @@ const ProblemStatements = () => {
           }
         });
         
+<<<<<<< HEAD
         // QUEUE VALIDATION: Check slot availability
         if (currentProblemCount >= 3) {
           return { 
@@ -215,6 +231,11 @@ const ProblemStatements = () => {
             reason: 'SLOTS_FILLED',
             message: `All slots are filled for "${problemStatement.title}" (3/3 teams registered). Please select a different problem statement.`
           };
+=======
+        // VALIDATION: Final checks before registration
+        if (currentProblemCount >= 3) {
+          throw new Error(`"${selectedProblem.title}" is now full (3/3 teams). Another team registered while you were confirming.`);
+>>>>>>> parent of 58b435b (sep)
         }
         
         if (teamAlreadyExists) {
@@ -270,9 +291,15 @@ const ProblemStatements = () => {
     } catch (error) {
       console.error('Queue processing failed:', error);
       
+<<<<<<< HEAD
       // Handle specific queue errors
       if (error.message.includes('slots') || error.message.includes('filled')) {
         setRealTimeError(`🚫 All slots are filled. Please select a different problem statement.`);
+=======
+      // REAL-TIME ERROR: Show specific error message
+      if (error.message.includes('full') || error.message.includes('already registered')) {
+        setRealTimeError(error.message);
+>>>>>>> parent of 58b435b (sep)
       } else {
         setRealTimeError('Registration failed. Please try again.');
       }
@@ -444,21 +471,10 @@ const ProblemStatements = () => {
                   
                   <div className="alert alert-warning">
                     <strong>⚠️ Important:</strong> Once confirmed, this registration cannot be changed. Each team can only register for one problem statement.
-                    {selectedProblem && problemCounts[selectedProblem.id] >= 3 && (
-                      <div className="mt-2 text-danger">
-                        <strong>🚫 ALERT:</strong> This problem statement is now COMPLETED (3/3 teams filled)!
-                      </div>
-                    )}
                   </div>
                   
                   <p className="text-center">
-                    <strong>
-                      {selectedProblem && problemCounts[selectedProblem.id] >= 3 ? (
-                        <span className="text-danger">⚠️ This problem statement is now COMPLETED! Please select a different one.</span>
-                      ) : (
-                        'Are you sure you want to register for this problem statement?'
-                      )}
-                    </strong>
+                    <strong>Are you sure you want to register for this problem statement?</strong>
                   </p>
                 </div>
               </div>
@@ -475,7 +491,11 @@ const ProblemStatements = () => {
                   type="button" 
                   className="btn btn-success" 
                   onClick={handleConfirmSelection}
+<<<<<<< HEAD
                   disabled={loading || isCheckingAvailability || (selectedProblem && problemCounts[selectedProblem.id] >= 3)}
+=======
+                  disabled={loading}
+>>>>>>> parent of 58b435b (sep)
                 >
                   {isCheckingAvailability ? (
                     <>
@@ -487,8 +507,6 @@ const ProblemStatements = () => {
                       <span className="spinner-border spinner-border-sm me-2" role="status"></span>
                       Confirming...
                     </>
-                  ) : (selectedProblem && problemCounts[selectedProblem.id] >= 3) ? (
-                    'COMPLETED - FILLED'
                   ) : (
                     'Confirm Registration'
                   )}
