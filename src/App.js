@@ -3,8 +3,6 @@ import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
 import RegistrationForm from './components/RegistrationForm.jsx';
 import ProblemStatements from './components/ProblemStatements.jsx';
 import AdminDashboard from './components/AdminDashboard.jsx';
-import TatkalBookingSystem from './components/TatkalBookingSystem.jsx';
-import BookingTestSuite from './components/BookingTestSuite.jsx';
 import './App.css';
 
 function App() {
@@ -16,8 +14,6 @@ function App() {
             <span className="navbar-brand h1 mb-0">Problem Statement Registration</span>
             <div className="navbar-nav ms-auto">
               <a href="/" className="nav-link text-white">Home</a>
-              <a href="/tatkal" className="nav-link text-white">Tatkal Booking</a>
-              <a href="/test" className="nav-link text-white">Test Suite</a>
               <a href="/admin" className="nav-link text-white">Admin</a>
             </div>
           </div>
@@ -27,8 +23,6 @@ function App() {
           <Routes>
             <Route path="/" element={<RegistrationForm />} />
             <Route path="/problems/:teamData" element={<ProblemStatements />} />
-            <Route path="/tatkal" element={<TatkalBookingSystem />} />
-            <Route path="/test" element={<BookingTestSuite />} />
             <Route path="/admin" element={<AdminDashboard />} />
           </Routes>
         </div>
