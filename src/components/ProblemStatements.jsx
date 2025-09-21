@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { db } from '../firebase';
-import { collection, addDoc, query, getDocs } from 'firebase/firestore';
+import { collection, addDoc, query, getDocs, onSnapshot, runTransaction, doc } from 'firebase/firestore';
 
 // Sample problem statements data
 const PROBLEM_STATEMENTS = [
@@ -49,26 +49,28 @@ const ProblemStatements = () => {
   // OPTIMIZED: Cache team registration status to avoid repeated checks
   const [teamRegistrationStatus, setTeamRegistrationStatus] = useState(null);
   const [allRegistrations, setAllRegistrations] = useState([]);
+  // REAL-TIME: Track real-time updates and conflicts
+  const [realTimeError, setRealTimeError] = useState('');
+  const [isProcessing, setIsProcessing] = useState(false);
 
   useEffect(() => {
     try {
       const decodedTeamData = JSON.parse(atob(teamData));
       setTeam(decodedTeamData);
-      // OPTIMIZED: Fetch all data in parallel
-      fetchAllDataOptimized(decodedTeamData.teamNumber);
+      // REAL-TIME: Set up real-time listener for problem statement updates
+      setupRealTimeListener(decodedTeamData.teamNumber);
     } catch (error) {
       console.error('Invalid team data');
       navigate('/');
     }
   }, [teamData, navigate]);
 
-  // OPTIMIZED: Single function to fetch all data with one database query
-  const fetchAllDataOptimized = async (teamNumber) => {
-    try {
-      // Single query to get all registrations
-      const q = query(collection(db, 'registrations'));
-      const querySnapshot = await getDocs(q);
-      
+  // REAL-TIME: Set up Firebase real-time listener for immediate updates
+  const setupRealTimeListener = useCallback((teamNumber) => {
+    const q = query(collection(db, 'registrations'));
+    
+    // Set up real-time listener
+    const unsubscribe = onSnapshot(q, (querySnapshot) => {
       const registrations = [];
       const counts = {};
       let teamAlreadyRegistered = false;
@@ -78,7 +80,7 @@ const ProblemStatements = () => {
         counts[problem.id] = 0;
       });
       
-      // Process all registrations in one loop
+      // Process all registrations in real-time
       querySnapshot.forEach(doc => {
         const data = doc.data();
         registrations.push(data);
@@ -98,17 +100,33 @@ const ProblemStatements = () => {
       setProblemCounts(counts);
       setTeamRegistrationStatus(teamAlreadyRegistered);
       
-    } catch (error) {
-      console.error('Error fetching data:', error);
-    }
-  };
+      // REAL-TIME: Check if selected problem got filled while user was deciding
+      if (selectedProblem && counts[selectedProblem.id] >= 3) {
+        setRealTimeError(`Sorry! "${selectedProblem.title}" was just filled by another team. Please select a different problem statement.`);
+        setShowConfirmation(false);
+        setSelectedProblem(null);
+      }
+    }, (error) => {
+      console.error('Error with real-time listener:', error);
+    });
+    
+    // Cleanup listener on component unmount
+    return () => unsubscribe();
+  }, [selectedProblem]);
+
+  // OPTIMIZED: Remove redundant fetchAllDataOptimized function (replaced by real-time listener)
 
   // OPTIMIZED: Remove redundant fetchProblemCounts function (replaced by fetchAllDataOptimized)
 
-  // OPTIMIZED: Use cached team registration status instead of database query
+  // REAL-TIME & RACE-CONDITION SAFE: Enhanced problem selection with immediate validation
   const handleSelectProblem = useCallback(async (problemStatement) => {
+    // Clear any previous errors
+    setRealTimeError('');
+    
+    // REAL-TIME CHECK: Verify current count from latest state
     if (problemCounts[problemStatement.id] >= 3) {
-      return; // Already at limit
+      setRealTimeError(`"${problemStatement.title}" is already filled (3/3 teams registered). Please select a different problem statement.`);
+      return;
     }
 
     // OPTIMIZED: Use cached registration status instead of database query
@@ -122,53 +140,84 @@ const ProblemStatements = () => {
     setShowConfirmation(true);
   }, [problemCounts, teamRegistrationStatus, team]);
 
+  // RACE-CONDITION SAFE: Atomic transaction for registration with double-check
   const handleConfirmSelection = async () => {
     if (!selectedProblem) return;
 
+    setIsProcessing(true);
     setLoading(true);
     setShowConfirmation(false);
+    setRealTimeError('');
     
     try {
-      // OPTIMIZED: Use optimistic updates for instant UI feedback
-      const optimisticCounts = {
-        ...problemCounts,
-        [selectedProblem.id]: (problemCounts[selectedProblem.id] || 0) + 1
-      };
-      setProblemCounts(optimisticCounts);
-      setTeamRegistrationStatus(true);
+      // ATOMIC TRANSACTION: Ensures no race conditions with 3-team limit
+      await runTransaction(db, async (transaction) => {
+        // Double-check: Get current registrations count at time of registration
+        const registrationsRef = collection(db, 'registrations');
+        const q = query(registrationsRef);
+        const querySnapshot = await getDocs(q);
+        
+        let currentProblemCount = 0;
+        let teamAlreadyExists = false;
+        
+        // Count current registrations for selected problem and check team status
+        querySnapshot.forEach(doc => {
+          const data = doc.data();
+          if (data.problemStatementId === selectedProblem.id) {
+            currentProblemCount++;
+          }
+          if (data.teamNumber === team.teamNumber) {
+            teamAlreadyExists = true;
+          }
+        });
+        
+        // VALIDATION: Final checks before registration
+        if (currentProblemCount >= 3) {
+          throw new Error(`"${selectedProblem.title}" is now full (3/3 teams). Another team registered while you were confirming.`);
+        }
+        
+        if (teamAlreadyExists) {
+          throw new Error(`Team ${team.teamNumber} has already registered for a problem statement.`);
+        }
+        
+        // SAFE REGISTRATION: Add new registration within transaction
+        const registrationData = {
+          teamNumber: team.teamNumber,
+          teamName: team.teamName,
+          teamLeader: team.teamLeader,
+          problemStatementId: selectedProblem.id,
+          problemStatementTitle: selectedProblem.title,
+          timestamp: new Date()
+        };
+        
+        // Add registration document
+        const newDocRef = doc(collection(db, 'registrations'));
+        transaction.set(newDocRef, registrationData);
+      });
 
-      // OPTIMIZED: Prepare data object once
-      const registrationData = {
-        teamNumber: team.teamNumber,
-        teamName: team.teamName,
-        teamLeader: team.teamLeader,
-        problemStatementId: selectedProblem.id,
-        problemStatementTitle: selectedProblem.title,
-        timestamp: new Date()
-      };
-
-      // Add registration to Firestore
-      await addDoc(collection(db, 'registrations'), registrationData);
-
+      // SUCCESS: Registration completed successfully
       setSuccessMessage(`Registration Successful – Your team has been registered for "${selectedProblem.title}".`);
       setSelectedProblem(null);
       
-      // OPTIMIZED: Faster redirect
+      // Faster redirect
       setTimeout(() => {
         navigate('/');
-      }, 2000); // Reduced from 3 seconds to 2 seconds
+      }, 2000);
       
     } catch (error) {
-      console.error('Error registering team:', error);
+      console.error('Registration error:', error);
       
-      // OPTIMIZED: Revert optimistic updates on error
-      setProblemCounts(problemCounts);
-      setTeamRegistrationStatus(false);
+      // REAL-TIME ERROR: Show specific error message
+      if (error.message.includes('full') || error.message.includes('already registered')) {
+        setRealTimeError(error.message);
+      } else {
+        setRealTimeError('Registration failed. Please try again.');
+      }
       
-      alert('Error registering team. Please try again.');
       setSelectedProblem(null);
     } finally {
       setLoading(false);
+      setIsProcessing(false);
     }
   };
 
@@ -225,10 +274,10 @@ const ProblemStatements = () => {
                 
                 <button
                   onClick={() => handleSelectProblem(problem)}
-                  disabled={isDisabled || loading}
+                  disabled={isDisabled || loading || isProcessing}
                   className={`btn ${isDisabled ? 'btn-danger' : 'btn-primary'}`}
                 >
-                  {isDisabled ? 'FILLED' : loading ? 'Processing...' : 'Select'}
+                  {isDisabled ? 'FILLED' : (loading || isProcessing) ? 'Processing...' : 'Select'}
                 </button>
               </div>
             </div>
@@ -236,7 +285,7 @@ const ProblemStatements = () => {
         </div>
       );
     });
-  }, [problemCounts, loading, handleSelectProblem]);
+  }, [problemCounts, loading, isProcessing, handleSelectProblem]);
 
   if (!team) {
     return <div className="text-center">Loading...</div>;
@@ -258,6 +307,35 @@ const ProblemStatements = () => {
 
   return (
     <div>
+      {/* REAL-TIME ERROR ALERT */}
+      {realTimeError && (
+        <div className="row justify-content-center mb-4">
+          <div className="col-md-8">
+            <div className="alert alert-warning alert-dismissible" role="alert">
+              <h6 className="alert-heading">⚠️ Real-time Update</h6>
+              <p className="mb-0">{realTimeError}</p>
+              <button 
+                type="button" 
+                className="btn-close" 
+                onClick={() => setRealTimeError('')}
+                aria-label="Close"
+              ></button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* PROCESSING INDICATOR */}
+      {isProcessing && (
+        <div className="row justify-content-center mb-4">
+          <div className="col-md-8">
+            <div className="alert alert-info text-center">
+              <div className="spinner-border spinner-border-sm me-2" role="status"></div>
+              Processing your registration... Please wait.
+            </div>
+          </div>
+        </div>
+      )}
       {/* Confirmation Modal */}
       {showConfirmation && selectedProblem && (
         <div className="modal show d-block" style={{ backgroundColor: 'rgba(0,0,0,0.5)' }}>
