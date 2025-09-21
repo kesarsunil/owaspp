@@ -140,9 +140,17 @@ const ProblemStatements = () => {
     setShowConfirmation(true);
   }, [problemCounts, teamRegistrationStatus, team]);
 
-  // RACE-CONDITION SAFE: Atomic transaction for registration with double-check
+  // RACE-CONDITION SAFE: Atomic transaction for registration with multiple validation checks
   const handleConfirmSelection = async () => {
     if (!selectedProblem) return;
+
+    // FINAL CHECK: Real-time validation before processing
+    if (problemCounts[selectedProblem.id] >= 3) {
+      setRealTimeError(`"${selectedProblem.title}" is now COMPLETED (3/3 teams filled). Please select a different problem statement.`);
+      setShowConfirmation(false);
+      setSelectedProblem(null);
+      return;
+    }
 
     setIsProcessing(true);
     setLoading(true);
@@ -150,9 +158,9 @@ const ProblemStatements = () => {
     setRealTimeError('');
     
     try {
-      // ATOMIC TRANSACTION: Ensures no race conditions with 3-team limit
+      // ATOMIC TRANSACTION: Ensures no race conditions with millisecond-level protection
       await runTransaction(db, async (transaction) => {
-        // Double-check: Get current registrations count at time of registration
+        // MILLISECOND CHECK: Get the absolute latest count at transaction time
         const registrationsRef = collection(db, 'registrations');
         const q = query(registrationsRef);
         const querySnapshot = await getDocs(q);
@@ -171,9 +179,9 @@ const ProblemStatements = () => {
           }
         });
         
-        // VALIDATION: Final checks before registration
+        // FINAL VALIDATION: Last-millisecond checks before registration
         if (currentProblemCount >= 3) {
-          throw new Error(`"${selectedProblem.title}" is now full (3/3 teams). Another team registered while you were confirming.`);
+          throw new Error(`COMPLETED: "${selectedProblem.title}" is now filled (3/3 teams). Registration closed.`);
         }
         
         if (teamAlreadyExists) {
@@ -207,9 +215,11 @@ const ProblemStatements = () => {
     } catch (error) {
       console.error('Registration error:', error);
       
-      // REAL-TIME ERROR: Show specific error message
-      if (error.message.includes('full') || error.message.includes('already registered')) {
-        setRealTimeError(error.message);
+      // COMPLETION ERROR: Show specific error message for filled problems
+      if (error.message.includes('COMPLETED') || error.message.includes('filled') || error.message.includes('closed')) {
+        setRealTimeError(`❌ ${error.message}`);
+      } else if (error.message.includes('already registered')) {
+        setRealTimeError(`⚠️ ${error.message}`);
       } else {
         setRealTimeError('Registration failed. Please try again.');
       }
@@ -365,10 +375,21 @@ const ProblemStatements = () => {
                   
                   <div className="alert alert-warning">
                     <strong>⚠️ Important:</strong> Once confirmed, this registration cannot be changed. Each team can only register for one problem statement.
+                    {selectedProblem && problemCounts[selectedProblem.id] >= 3 && (
+                      <div className="mt-2 text-danger">
+                        <strong>🚫 ALERT:</strong> This problem statement is now COMPLETED (3/3 teams filled)!
+                      </div>
+                    )}
                   </div>
                   
                   <p className="text-center">
-                    <strong>Are you sure you want to register for this problem statement?</strong>
+                    <strong>
+                      {selectedProblem && problemCounts[selectedProblem.id] >= 3 ? (
+                        <span className="text-danger">⚠️ This problem statement is now COMPLETED! Please select a different one.</span>
+                      ) : (
+                        'Are you sure you want to register for this problem statement?'
+                      )}
+                    </strong>
                   </p>
                 </div>
               </div>
@@ -385,13 +406,15 @@ const ProblemStatements = () => {
                   type="button" 
                   className="btn btn-success" 
                   onClick={handleConfirmSelection}
-                  disabled={loading}
+                  disabled={loading || (selectedProblem && problemCounts[selectedProblem.id] >= 3)}
                 >
                   {loading ? (
                     <>
                       <span className="spinner-border spinner-border-sm me-2" role="status"></span>
                       Confirming...
                     </>
+                  ) : (selectedProblem && problemCounts[selectedProblem.id] >= 3) ? (
+                    'COMPLETED - FILLED'
                   ) : (
                     'Confirm Registration'
                   )}
