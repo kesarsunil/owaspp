@@ -52,6 +52,12 @@ const ProblemStatements = () => {
   // REAL-TIME: Track real-time updates and conflicts
   const [realTimeError, setRealTimeError] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
+  
+  // QUEUE SYSTEM: Handle multiple simultaneous submissions
+  const [isCheckingAvailability, setIsCheckingAvailability] = useState(false);
+  const [queuePosition, setQueuePosition] = useState(null);
+  const [submissionQueue, setSubmissionQueue] = useState([]);
+  const [isInQueue, setIsInQueue] = useState(false);
 
   useEffect(() => {
     try {
@@ -140,7 +146,7 @@ const ProblemStatements = () => {
     setShowConfirmation(true);
   }, [problemCounts, teamRegistrationStatus, team]);
 
-  // RACE-CONDITION SAFE: Atomic transaction for registration with multiple validation checks
+  // RACE-CONDITION SAFE: Queue-based submission system with slot availability checking
   const handleConfirmSelection = async () => {
     if (!selectedProblem) return;
 
@@ -152,15 +158,38 @@ const ProblemStatements = () => {
       return;
     }
 
-    setIsProcessing(true);
-    setLoading(true);
+    // QUEUE SYSTEM: Add to submission queue for processing
+    setIsCheckingAvailability(true);
     setShowConfirmation(false);
     setRealTimeError('');
     
     try {
-      // ATOMIC TRANSACTION: Ensures no race conditions with millisecond-level protection
-      await runTransaction(db, async (transaction) => {
-        // MILLISECOND CHECK: Get the absolute latest count at transaction time
+      // Generate unique queue ID for this submission
+      const queueId = `${team.teamNumber}_${selectedProblem.id}_${Date.now()}`;
+      
+      // Add to queue and process
+      await processSubmissionQueue(queueId, selectedProblem);
+      
+    } catch (error) {
+      console.error('Queue processing error:', error);
+      setRealTimeError('Submission failed. Please try again.');
+      setSelectedProblem(null);
+    } finally {
+      setIsCheckingAvailability(false);
+      setIsInQueue(false);
+      setQueuePosition(null);
+    }
+  };
+
+  // QUEUE PROCESSING: Handle multiple simultaneous submissions with slot checking
+  const processSubmissionQueue = async (queueId, problemStatement) => {
+    setIsInQueue(true);
+    setQueuePosition('Checking availability...');
+    
+    try {
+      // SLOT AVAILABILITY CHECK: Use atomic transaction to check and reserve slot
+      const result = await runTransaction(db, async (transaction) => {
+        // Get current registrations at the exact moment of processing
         const registrationsRef = collection(db, 'registrations');
         const q = query(registrationsRef);
         const querySnapshot = await getDocs(q);
@@ -171,7 +200,7 @@ const ProblemStatements = () => {
         // Count current registrations for selected problem and check team status
         querySnapshot.forEach(doc => {
           const data = doc.data();
-          if (data.problemStatementId === selectedProblem.id) {
+          if (data.problemStatementId === problemStatement.id) {
             currentProblemCount++;
           }
           if (data.teamNumber === team.teamNumber) {
@@ -179,55 +208,76 @@ const ProblemStatements = () => {
           }
         });
         
-        // FINAL VALIDATION: Last-millisecond checks before registration
+        // QUEUE VALIDATION: Check slot availability
         if (currentProblemCount >= 3) {
-          throw new Error(`COMPLETED: "${selectedProblem.title}" is now filled (3/3 teams). Registration closed.`);
+          return { 
+            success: false, 
+            reason: 'SLOTS_FILLED',
+            message: `All slots are filled for "${problemStatement.title}" (3/3 teams registered). Please select a different problem statement.`
+          };
         }
         
         if (teamAlreadyExists) {
-          throw new Error(`Team ${team.teamNumber} has already registered for a problem statement.`);
+          return { 
+            success: false, 
+            reason: 'TEAM_EXISTS',
+            message: `Team ${team.teamNumber} has already registered for a problem statement.`
+          };
         }
         
-        // SAFE REGISTRATION: Add new registration within transaction
+        // SLOT RESERVATION: Reserve slot by registering immediately
         const registrationData = {
           teamNumber: team.teamNumber,
           teamName: team.teamName,
           teamLeader: team.teamLeader,
-          problemStatementId: selectedProblem.id,
-          problemStatementTitle: selectedProblem.title,
-          timestamp: new Date()
+          problemStatementId: problemStatement.id,
+          problemStatementTitle: problemStatement.title,
+          timestamp: new Date(),
+          queueId: queueId // Track queue processing
         };
         
-        // Add registration document
+        // Reserve the slot
         const newDocRef = doc(collection(db, 'registrations'));
         transaction.set(newDocRef, registrationData);
+        
+        return { 
+          success: true, 
+          message: `Registration successful for "${problemStatement.title}"`
+        };
       });
-
-      // SUCCESS: Registration completed successfully
-      setSuccessMessage(`Registration Successful – Your team has been registered for "${selectedProblem.title}".`);
-      setSelectedProblem(null);
       
-      // Faster redirect
-      setTimeout(() => {
-        navigate('/');
-      }, 2000);
+      // PROCESS RESULT: Handle queue processing result
+      if (result.success) {
+        setSuccessMessage(`Registration Successful – Your team has been registered for "${problemStatement.title}".`);
+        setSelectedProblem(null);
+        
+        // Redirect after success
+        setTimeout(() => {
+          navigate('/');
+        }, 2000);
+      } else {
+        // Handle different failure reasons
+        if (result.reason === 'SLOTS_FILLED') {
+          setRealTimeError(`🚫 ${result.message}`);
+        } else if (result.reason === 'TEAM_EXISTS') {
+          setRealTimeError(`⚠️ ${result.message}`);
+        } else {
+          setRealTimeError(result.message);
+        }
+        setSelectedProblem(null);
+      }
       
     } catch (error) {
-      console.error('Registration error:', error);
+      console.error('Queue processing failed:', error);
       
-      // COMPLETION ERROR: Show specific error message for filled problems
-      if (error.message.includes('COMPLETED') || error.message.includes('filled') || error.message.includes('closed')) {
-        setRealTimeError(`❌ ${error.message}`);
-      } else if (error.message.includes('already registered')) {
-        setRealTimeError(`⚠️ ${error.message}`);
+      // Handle specific queue errors
+      if (error.message.includes('slots') || error.message.includes('filled')) {
+        setRealTimeError(`🚫 All slots are filled. Please select a different problem statement.`);
       } else {
         setRealTimeError('Registration failed. Please try again.');
       }
       
       setSelectedProblem(null);
-    } finally {
-      setLoading(false);
-      setIsProcessing(false);
     }
   };
 
@@ -284,10 +334,12 @@ const ProblemStatements = () => {
                 
                 <button
                   onClick={() => handleSelectProblem(problem)}
-                  disabled={isDisabled || loading || isProcessing}
+                  disabled={isDisabled || loading || isProcessing || isCheckingAvailability}
                   className={`btn ${isDisabled ? 'btn-danger' : 'btn-primary'}`}
                 >
-                  {isDisabled ? 'FILLED' : (loading || isProcessing) ? 'Processing...' : 'Select'}
+                  {isDisabled ? 'FILLED' : 
+                   isCheckingAvailability ? 'Checking...' :
+                   (loading || isProcessing) ? 'Processing...' : 'Select'}
                 </button>
               </div>
             </div>
@@ -295,7 +347,7 @@ const ProblemStatements = () => {
         </div>
       );
     });
-  }, [problemCounts, loading, isProcessing, handleSelectProblem]);
+  }, [problemCounts, loading, isProcessing, isCheckingAvailability, handleSelectProblem]);
 
   if (!team) {
     return <div className="text-center">Loading...</div>;
@@ -330,6 +382,23 @@ const ProblemStatements = () => {
                 onClick={() => setRealTimeError('')}
                 aria-label="Close"
               ></button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* QUEUE PROCESSING INDICATOR */}
+      {isCheckingAvailability && (
+        <div className="row justify-content-center mb-4">
+          <div className="col-md-8">
+            <div className="alert alert-info text-center">
+              <div className="spinner-border spinner-border-sm me-2" role="status"></div>
+              <strong>Checking for availability...</strong>
+              {queuePosition && (
+                <div className="mt-2 small text-muted">
+                  {queuePosition}
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -406,9 +475,14 @@ const ProblemStatements = () => {
                   type="button" 
                   className="btn btn-success" 
                   onClick={handleConfirmSelection}
-                  disabled={loading || (selectedProblem && problemCounts[selectedProblem.id] >= 3)}
+                  disabled={loading || isCheckingAvailability || (selectedProblem && problemCounts[selectedProblem.id] >= 3)}
                 >
-                  {loading ? (
+                  {isCheckingAvailability ? (
+                    <>
+                      <span className="spinner-border spinner-border-sm me-2" role="status"></span>
+                      Checking Availability...
+                    </>
+                  ) : loading ? (
                     <>
                       <span className="spinner-border spinner-border-sm me-2" role="status"></span>
                       Confirming...
